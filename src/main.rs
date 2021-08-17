@@ -1,10 +1,17 @@
 extern crate glium;
 
+use egui::Stroke;
 use color_eyre::{owo_colors::Color, Result};
 use cpal::{
     traits::{DeviceTrait, HostTrait, StreamTrait},
     Device, Stream,
 };
+use crossbeam::channel::{Receiver, Sender};
+use egui::plot::Line;
+use egui::plot::Plot;
+use egui::plot::Points;
+use egui::plot::Value;
+use egui::plot::Values;
 use glium::{
     draw_parameters,
     glutin::{
@@ -52,12 +59,15 @@ impl Vertex {
 
 use rustfft::{num_complex::Complex32, FftPlanner};
 
-fn init_audio() -> Result<(Device, Stream, [Complex32; 480])> {
-    let mut planner = FftPlanner::<f32>::new();
-    let fft = planner.plan_fft_forward(480);
+type Buffer = [Complex32; 480];
+
+fn init_audio(output: Sender<[f32; 480]>) -> Result<(Device, Stream)> {
+    // let mut planner = FftPlanner::<f32>::new();
+    // let fft = planner.plan_fft_forward(480);
+    // let mut buffer = [Complex32::default(); 480];
+    let mut buffer = [0.0; 480];
 
     let host = cpal::default_host();
-    let mut buffer = [Complex32::new(0.0, 0.0); 480];
     println!("-- Input Devices --");
     for id in host.input_devices()? {
         println!("{:?}", id.name());
@@ -69,15 +79,16 @@ fn init_audio() -> Result<(Device, Stream, [Complex32; 480])> {
     println!("{:?}", config);
     let stream = device.build_input_stream(
         &config.into(),
-        |data: &[f32], info| {
+        move |data: &[f32], info| {
             for (i, c) in data.iter().zip(buffer.iter_mut()) {
-                c.re = *i;
+                *c = *i;
             }
-            fft.process(&mut buffer);
+            // fft.process(&mut buffer);
+            output.send(buffer).unwrap();
         },
         |err| panic!(),
     )?;
-    Ok((device, stream, buffer))
+    Ok((device, stream))
 }
 
 fn init_graphics() -> Result<(Display, Program, VertexBuffer<Vertex>, EventLoop<()>)> {
@@ -103,13 +114,21 @@ fn init_graphics() -> Result<(Display, Program, VertexBuffer<Vertex>, EventLoop<
 fn main() -> Result<()> {
     std::env::set_var("RUST_BACKTRACE", "1");
     color_eyre::install()?;
-    let (input_device, stream, buffer) = init_audio()?;
-    let (display, program, vertices, event_loop) = init_graphics()?;
+    let mut buffer = [Default::default(); 480];
+    let (tx, rx) = crossbeam::channel::unbounded();
+
+    let (input_device, stream) = init_audio(tx)?;
+    let (display, _program, _vertices, event_loop) = init_graphics()?;
+    let mut egui = egui::CtxRef::default();
+    let mut painter = egui_glium::Painter::new(&display);
     // let indices = IndexBuffer::new(&display, PrimitiveType::Points, &[0, 1, 2])?;
 
     stream.play()?;
     event_loop.run(move |e, _t, c| {
-        // println!("{:?}", buffer);
+        if let Ok(b) = rx.try_recv() {
+            buffer = b;
+        }
+
         match e {
             Event::NewEvents(_) => {}
             Event::WindowEvent { window_id, event } => match event {
@@ -143,30 +162,40 @@ fn main() -> Result<()> {
                 | WindowEvent::ScaleFactorChanged { .. }
                 | WindowEvent::ThemeChanged(_) => {}
             },
-            Event::RedrawRequested(_window) => {
+            Event::MainEventsCleared => {
+                let points = buffer
+                    .iter()
+                    .enumerate()
+                    .map(|(i, c)| Value::new(i as f64, *c as f64));
+                let bounds = Points::new(Values::from_values(vec![Value::new(0.0, -1.1), Value::new(0.0, 1.1)]));
+                let line = Line::new(Values::from_values_iter(points)).stroke(Stroke::new(2.0, egui::Color32::RED));
+                let plot = Plot::new("Audio").line(line).points(bounds);
+
+                egui.begin_frame(Default::default());
+                egui::Window::new("My Window").fixed_size((500.0, 500.0)).show(&egui, |ui| {
+                    ui.label("Hi!");
+                    ui.add(plot);
+                });
+                let (_output, shapes) = egui.end_frame();
+                let clipped_mesh = egui.tessellate(shapes);
                 let mut target = display.draw();
-                let uniforms = uniform! {};
-                target
-                    .draw(
-                        &vertices,
-                        &NoIndices(PrimitiveType::Points),
-                        &program,
-                        &uniforms,
-                        &DrawParameters {
-                            point_size: Some(2.0),
-                            ..Default::default()
-                        },
-                    )
-                    .unwrap();
+                let scale = display.gl_window().window().scale_factor();
+                target.clear_color(0.3, 0.3, 0.3, 1.0);
+                painter.paint_meshes(
+                    &display,
+                    &mut target,
+                    scale as f32,
+                    clipped_mesh,
+                    &egui.texture(),
+                );
                 target.finish().unwrap();
             }
             Event::DeviceEvent { .. }
             | Event::UserEvent(_)
             | Event::Suspended
             | Event::Resumed
-            | Event::MainEventsCleared
             | Event::RedrawEventsCleared
-            | Event::LoopDestroyed => {}
+            | Event::LoopDestroyed | _ => {}
         }
     });
 }
