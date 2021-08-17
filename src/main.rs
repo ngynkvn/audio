@@ -62,6 +62,7 @@ use rustfft::{num_complex::Complex32, FftPlanner};
 type Buffer = [Complex32; 480];
 
 fn init_audio(output: Sender<[f32; 480]>) -> Result<(Device, Stream)> {
+    puffin::profile_function!();
     // let mut planner = FftPlanner::<f32>::new();
     // let fft = planner.plan_fft_forward(480);
     // let mut buffer = [Complex32::default(); 480];
@@ -92,6 +93,7 @@ fn init_audio(output: Sender<[f32; 480]>) -> Result<(Device, Stream)> {
 }
 
 fn init_graphics() -> Result<(Display, Program, VertexBuffer<Vertex>, EventLoop<()>)> {
+    puffin::profile_function!();
     let events_loop = glutin::event_loop::EventLoop::new();
     let cb = glutin::ContextBuilder::new();
 
@@ -111,9 +113,13 @@ fn init_graphics() -> Result<(Display, Program, VertexBuffer<Vertex>, EventLoop<
     Ok((display, program, vertices, events_loop))
 }
 
+
 fn main() -> Result<()> {
-    std::env::set_var("RUST_BACKTRACE", "1");
     color_eyre::install()?;
+    std::env::set_var("RUST_BACKTRACE", "1");
+    puffin::profile_function!();
+    puffin::set_scopes_on(true);
+    let server = puffin_http::Server::new("127.0.0.1:8585").unwrap();
     let mut buffer = [Default::default(); 480];
     let (tx, rx) = crossbeam::channel::unbounded();
 
@@ -125,6 +131,7 @@ fn main() -> Result<()> {
 
     stream.play()?;
     event_loop.run(move |e, _t, c| {
+        puffin::profile_scope!("Event Handler");
         if let Ok(b) = rx.try_recv() {
             buffer = b;
         }
@@ -163,6 +170,7 @@ fn main() -> Result<()> {
                 | WindowEvent::ThemeChanged(_) => {}
             },
             Event::MainEventsCleared => {
+                puffin::profile_scope!("Plot");
                 let points = buffer
                     .iter()
                     .enumerate()
@@ -197,5 +205,7 @@ fn main() -> Result<()> {
             | Event::RedrawEventsCleared
             | Event::LoopDestroyed | _ => {}
         }
+        puffin::GlobalProfiler::lock().new_frame();
+        server.update();
     });
 }
