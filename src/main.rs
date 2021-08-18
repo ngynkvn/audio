@@ -1,23 +1,24 @@
 extern crate glium;
 
-use egui::Stroke;
 use color_eyre::{owo_colors::Color, Result};
 use cpal::{
     traits::{DeviceTrait, HostTrait, StreamTrait},
-    Device, Stream,
+    Device, Host, Stream,
 };
 use crossbeam::channel::{Receiver, Sender};
-use egui::plot::Line;
-use egui::plot::Plot;
-use egui::plot::Points;
 use egui::plot::Value;
 use egui::plot::Values;
+use egui::Stroke;
+use egui::{plot::Line, Pos2};
+use egui::{plot::Plot, Vec2};
+use egui::{plot::Points, Modifiers};
 use glium::{
     draw_parameters,
     glutin::{
         self,
-        event::Event,
-        event::{self, WindowEvent},
+        dpi::PhysicalPosition,
+        event::{self, DeviceEvent, ModifiersState, MouseScrollDelta, WindowEvent},
+        event::{ElementState, Event},
         event_loop::{ControlFlow, EventLoop},
     },
     implement_vertex,
@@ -61,7 +62,15 @@ use rustfft::{num_complex::Complex32, FftPlanner};
 
 type Buffer = [Complex32; 480];
 
-fn init_audio(output: Sender<[f32; 480]>) -> Result<(Device, Stream)> {
+struct AudioInfo {
+    host: Host,
+    input_device: Device,
+    input_stream: Stream,
+    // output_device: Device,
+    // output_stream: Stream,
+}
+
+fn init_audio(output: Sender<[f32; 480]>) -> Result<AudioInfo> {
     puffin::profile_function!();
     // let mut planner = FftPlanner::<f32>::new();
     // let fft = planner.plan_fft_forward(480);
@@ -73,12 +82,12 @@ fn init_audio(output: Sender<[f32; 480]>) -> Result<(Device, Stream)> {
     for id in host.input_devices()? {
         println!("{:?}", id.name());
     }
-    let device = host
+    let input_device = host
         .default_input_device()
         .expect("no input device available");
-    let config = device.default_input_config()?;
-    println!("{:?}", config);
-    let stream = device.build_input_stream(
+    let config = input_device.default_input_config()?;
+    println!("InputStreamConfigs: {:?}", config);
+    let input_stream = input_device.build_input_stream(
         &config.into(),
         move |data: &[f32], info| {
             for (i, c) in data.iter().zip(buffer.iter_mut()) {
@@ -89,7 +98,25 @@ fn init_audio(output: Sender<[f32; 480]>) -> Result<(Device, Stream)> {
         },
         |err| panic!(),
     )?;
-    Ok((device, stream))
+    let output_device = host
+        .default_output_device()
+        .expect("no output device available");
+    let config = output_device.default_output_config()?;
+    println!("OutputStreamConfigs: {:?}", config);
+    let output_stream = output_device.build_output_stream(
+        &config.into(),
+        move |data: &mut [f32], info| {
+            //
+        },
+        |err| panic!(),
+    )?;
+    Ok(AudioInfo {
+        host,
+        input_device,
+        input_stream,
+        // output_device,
+        // output_stream,
+    })
 }
 
 fn init_graphics() -> Result<(Display, Program, VertexBuffer<Vertex>, EventLoop<()>)> {
@@ -113,7 +140,6 @@ fn init_graphics() -> Result<(Display, Program, VertexBuffer<Vertex>, EventLoop<
     Ok((display, program, vertices, events_loop))
 }
 
-
 fn main() -> Result<()> {
     color_eyre::install()?;
     std::env::set_var("RUST_BACKTRACE", "1");
@@ -123,13 +149,32 @@ fn main() -> Result<()> {
     let mut buffer = [Default::default(); 480];
     let (tx, rx) = crossbeam::channel::unbounded();
 
-    let (input_device, stream) = init_audio(tx)?;
+    let AudioInfo {
+        input_device,
+        input_stream,
+        host,
+    } = init_audio(tx)?;
     let (display, _program, _vertices, event_loop) = init_graphics()?;
     let mut egui = egui::CtxRef::default();
     let mut painter = egui_glium::Painter::new(&display);
+    let mut scalar = 10.0;
+
+    struct InputHandler {
+        raw_input: egui::RawInput,
+        pointer_position: egui::Pos2,
+    }
+    impl InputHandler {
+        fn raw(&mut self) -> egui::RawInput {
+            std::mem::take(&mut self.raw_input)
+        }
+    }
+    let mut input_handler = InputHandler {
+        raw_input: Default::default(),
+        pointer_position: Default::default(),
+    };
     // let indices = IndexBuffer::new(&display, PrimitiveType::Points, &[0, 1, 2])?;
 
-    stream.play()?;
+    input_stream.play()?;
     event_loop.run(move |e, _t, c| {
         puffin::profile_scope!("Event Handler");
         if let Ok(b) = rx.try_recv() {
@@ -149,41 +194,111 @@ fn main() -> Result<()> {
                 } => {
                     println!("{:?}", input);
                 }
+                WindowEvent::DroppedFile(path) => {
+                    println!("{:?}", path)
+                }
+                WindowEvent::CursorMoved {
+                    position: PhysicalPosition { x, y },
+                    ..
+                } => {
+                    input_handler.pointer_position = Pos2::new(x as _, y as _);
+                    input_handler
+                        .raw_input
+                        .events
+                        .push(egui::Event::PointerMoved(input_handler.pointer_position));
+                }
+                WindowEvent::MouseInput {
+                    button: _button,
+                    state,
+                    ..
+                } => {
+                    input_handler
+                        .raw_input
+                        .events
+                        .push(egui::Event::PointerButton {
+                            pos: input_handler.pointer_position,
+                            button: egui::PointerButton::Primary,
+                            pressed: state == ElementState::Pressed,
+                            modifiers: Default::default(), /* fields */
+                        });
+                }
+                WindowEvent::MouseWheel {
+                    delta: MouseScrollDelta::LineDelta(x, y),
+                    ..
+                } => input_handler.raw_input.scroll_delta = Vec2::new(x, y),
+                WindowEvent::ModifiersChanged(mods) => {
+                    println!("{:?}", mods);
+                    input_handler.raw_input.modifiers = Modifiers {
+                        alt: mods.alt(),
+                        ctrl: mods.ctrl(),
+                        shift: mods.shift(),
+                        mac_cmd: false,
+                        command: mods.ctrl(),
+                    };
+                }
                 WindowEvent::Resized(_) => {}
                 WindowEvent::Moved(_)
                 | WindowEvent::Destroyed
-                | WindowEvent::DroppedFile(_)
                 | WindowEvent::HoveredFile(_)
                 | WindowEvent::HoveredFileCancelled
                 | WindowEvent::ReceivedCharacter(_)
                 | WindowEvent::Focused(_)
-                | WindowEvent::ModifiersChanged(_)
-                | WindowEvent::CursorMoved { .. }
                 | WindowEvent::CursorEntered { .. }
                 | WindowEvent::CursorLeft { .. }
-                | WindowEvent::MouseWheel { .. }
-                | WindowEvent::MouseInput { .. }
                 | WindowEvent::TouchpadPressure { .. }
                 | WindowEvent::AxisMotion { .. }
                 | WindowEvent::Touch(_)
                 | WindowEvent::ScaleFactorChanged { .. }
-                | WindowEvent::ThemeChanged(_) => {}
+                | WindowEvent::ThemeChanged(_)
+                | _ => {}
             },
             Event::MainEventsCleared => {
                 puffin::profile_scope!("Plot");
-                let points = buffer
+                let points: Vec<Value> = buffer
                     .iter()
                     .enumerate()
-                    .map(|(i, c)| Value::new(i as f64, *c as f64));
-                let bounds = Points::new(Values::from_values(vec![Value::new(0.0, -1.1), Value::new(0.0, 1.1)]));
-                let line = Line::new(Values::from_values_iter(points)).stroke(Stroke::new(2.0, egui::Color32::RED));
-                let plot = Plot::new("Audio").line(line).points(bounds);
+                    .map(|(i, c)| Value::new(i as f64, *c as f64))
+                    .collect();
 
-                egui.begin_frame(Default::default());
-                egui::Window::new("My Window").fixed_size((500.0, 500.0)).show(&egui, |ui| {
-                    ui.label("Hi!");
-                    ui.add(plot);
-                });
+                egui.begin_frame(input_handler.raw());
+                egui::Window::new("My Window")
+                    .default_size((100.0, 100.0))
+                    .show(&egui, |ui| {
+                        let line = Line::new(Values::from_values(points.clone()))
+                            .stroke(Stroke::new(2.0, egui::Color32::RED));
+                        let bounds = Points::new(Values::from_values(vec![
+                            Value::new(0.0, -1.1),
+                            Value::new(0.0, 1.1),
+                        ]));
+                        let plot = Plot::new("Audio").line(line).points(bounds);
+                        ui.label("Hi!");
+                        ui.add(plot);
+                    });
+
+                egui::Window::new("My Window2")
+                    .default_size((300.0, 300.0))
+                    .show(&egui, |ui| {
+                        let linspace = ndarray::Array::linspace(
+                            -std::f64::consts::PI,
+                            std::f64::consts::PI,
+                            buffer.len(),
+                        );
+                        let points = points.iter().zip(linspace).map(|(p, x)| {
+                            Value::new(
+                                (0.2 + p.y * scalar) * x.cos(),
+                                (0.2 + p.y * scalar) * x.sin(),
+                            )
+                        });
+                        let bounds = Points::new(Values::from_values(vec![
+                            Value::new(0.0, -1.1),
+                            Value::new(0.0, 1.1),
+                            Value::new(-1.0, -1.1),
+                            Value::new(1.0, 1.1),
+                        ]));
+                        let line = Points::new(Values::from_values_iter(points));
+                        let plot = Plot::new("Audio").points(line).points(bounds);
+                        ui.add(plot);
+                    });
                 let (_output, shapes) = egui.end_frame();
                 let clipped_mesh = egui.tessellate(shapes);
                 let mut target = display.draw();
@@ -198,12 +313,25 @@ fn main() -> Result<()> {
                 );
                 target.finish().unwrap();
             }
-            Event::DeviceEvent { .. }
-            | Event::UserEvent(_)
+            Event::DeviceEvent {
+                event: device_event,
+                ..
+            } => match device_event {
+                DeviceEvent::Added => {}
+                DeviceEvent::Removed => {}
+                DeviceEvent::MouseMotion { delta } => {}
+                DeviceEvent::MouseWheel { delta } => {}
+                DeviceEvent::Motion { axis, value } => {}
+                DeviceEvent::Button { button, state } => {}
+                DeviceEvent::Key(_) => {}
+                DeviceEvent::Text { codepoint } => {}
+            },
+            Event::UserEvent(_)
             | Event::Suspended
             | Event::Resumed
             | Event::RedrawEventsCleared
-            | Event::LoopDestroyed | _ => {}
+            | Event::LoopDestroyed => {}
+            Event::RedrawRequested(_) => {}
         }
         puffin::GlobalProfiler::lock().new_frame();
         server.update();
