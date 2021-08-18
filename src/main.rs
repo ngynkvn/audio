@@ -1,11 +1,16 @@
 extern crate glium;
 
+mod draw;
+mod input;
+use std::path::PathBuf;
+
 use color_eyre::{owo_colors::Color, Result};
 use cpal::{
     traits::{DeviceTrait, HostTrait, StreamTrait},
     Device, Host, Stream,
 };
 use crossbeam::channel::{Receiver, Sender};
+use draw::draw_frame;
 use egui::plot::Value;
 use egui::plot::Values;
 use egui::Stroke;
@@ -60,14 +65,16 @@ impl Vertex {
 
 use rustfft::{num_complex::Complex32, FftPlanner};
 
+use crate::input::{AudioPlayer, InputHandler};
+
 type Buffer = [Complex32; 480];
 
 struct AudioInfo {
     host: Host,
     input_device: Device,
     input_stream: Stream,
-    // output_device: Device,
-    // output_stream: Stream,
+    output_device: Device,
+    output_stream: Option<Stream>,
 }
 
 fn init_audio(output: Sender<[f32; 480]>) -> Result<AudioInfo> {
@@ -103,19 +110,12 @@ fn init_audio(output: Sender<[f32; 480]>) -> Result<AudioInfo> {
         .expect("no output device available");
     let config = output_device.default_output_config()?;
     println!("OutputStreamConfigs: {:?}", config);
-    let output_stream = output_device.build_output_stream(
-        &config.into(),
-        move |data: &mut [f32], info| {
-            //
-        },
-        |err| panic!(),
-    )?;
     Ok(AudioInfo {
         host,
         input_device,
         input_stream,
-        // output_device,
-        // output_stream,
+        output_device,
+        output_stream: None,
     })
 }
 
@@ -153,21 +153,14 @@ fn main() -> Result<()> {
         input_device,
         input_stream,
         host,
+        output_device,
+        mut output_stream,
     } = init_audio(tx)?;
     let (display, _program, _vertices, event_loop) = init_graphics()?;
     let mut egui = egui::CtxRef::default();
     let mut painter = egui_glium::Painter::new(&display);
-    let mut scalar = 10.0;
 
-    struct InputHandler {
-        raw_input: egui::RawInput,
-        pointer_position: egui::Pos2,
-    }
-    impl InputHandler {
-        fn raw(&mut self) -> egui::RawInput {
-            std::mem::take(&mut self.raw_input)
-        }
-    }
+    let mut audio_player = AudioPlayer { path: None };
     let mut input_handler = InputHandler {
         raw_input: Default::default(),
         pointer_position: Default::default(),
@@ -195,7 +188,7 @@ fn main() -> Result<()> {
                     println!("{:?}", input);
                 }
                 WindowEvent::DroppedFile(path) => {
-                    println!("{:?}", path)
+                    audio_player.path.replace(path);
                 }
                 WindowEvent::CursorMoved {
                     position: PhysicalPosition { x, y },
@@ -254,64 +247,14 @@ fn main() -> Result<()> {
             },
             Event::MainEventsCleared => {
                 puffin::profile_scope!("Plot");
-                let points: Vec<Value> = buffer
-                    .iter()
-                    .enumerate()
-                    .map(|(i, c)| Value::new(i as f64, *c as f64))
-                    .collect();
-
-                egui.begin_frame(input_handler.raw());
-                egui::Window::new("My Window")
-                    .default_size((100.0, 100.0))
-                    .show(&egui, |ui| {
-                        let line = Line::new(Values::from_values(points.clone()))
-                            .stroke(Stroke::new(2.0, egui::Color32::RED));
-                        let bounds = Points::new(Values::from_values(vec![
-                            Value::new(0.0, -1.1),
-                            Value::new(0.0, 1.1),
-                        ]));
-                        let plot = Plot::new("Audio").line(line).points(bounds);
-                        ui.label("Hi!");
-                        ui.add(plot);
-                    });
-
-                egui::Window::new("My Window2")
-                    .default_size((300.0, 300.0))
-                    .show(&egui, |ui| {
-                        let linspace = ndarray::Array::linspace(
-                            -std::f64::consts::PI,
-                            std::f64::consts::PI,
-                            buffer.len(),
-                        );
-                        let points = points.iter().zip(linspace).map(|(p, x)| {
-                            Value::new(
-                                (0.2 + p.y * scalar) * x.cos(),
-                                (0.2 + p.y * scalar) * x.sin(),
-                            )
-                        });
-                        let bounds = Points::new(Values::from_values(vec![
-                            Value::new(0.0, -1.1),
-                            Value::new(0.0, 1.1),
-                            Value::new(-1.0, -1.1),
-                            Value::new(1.0, 1.1),
-                        ]));
-                        let line = Points::new(Values::from_values_iter(points));
-                        let plot = Plot::new("Audio").points(line).points(bounds);
-                        ui.add(plot);
-                    });
-                let (_output, shapes) = egui.end_frame();
-                let clipped_mesh = egui.tessellate(shapes);
-                let mut target = display.draw();
-                let scale = display.gl_window().window().scale_factor();
-                target.clear_color(0.3, 0.3, 0.3, 1.0);
-                painter.paint_meshes(
+                draw_frame(
                     &display,
-                    &mut target,
-                    scale as f32,
-                    clipped_mesh,
-                    &egui.texture(),
+                    &mut egui,
+                    &buffer,
+                    &mut input_handler,
+                    &mut painter,
+                    &audio_player,
                 );
-                target.finish().unwrap();
             }
             Event::DeviceEvent {
                 event: device_event,
