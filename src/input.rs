@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub struct InputHandler {
     pub raw_input: egui::RawInput,

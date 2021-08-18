@@ -48,7 +48,7 @@ fn draw_circle_graph(buffer: &[f32]) -> impl FnOnce(&mut Ui) {
     }
 }
 
-fn draw_audio_player(path: &PathBuf) -> impl FnOnce(&mut Ui) {
+fn draw_audio_player<'a>(path: &'a PathBuf) -> impl FnOnce(&mut Ui) + 'a {
     move |ui| {
         ui.label(format!("Now playing: {:?}", path));
     }

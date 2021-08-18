@@ -2,7 +2,7 @@ extern crate glium;
 
 mod draw;
 mod input;
-use std::path::PathBuf;
+use std::{io::Cursor, path::PathBuf};
 
 use color_eyre::{owo_colors::Color, Result};
 use cpal::{
@@ -63,6 +63,7 @@ impl Vertex {
     }
 }
 
+use puremp3::Mp3Decoder;
 use rustfft::{num_complex::Complex32, FftPlanner};
 
 use crate::input::{AudioPlayer, InputHandler};
@@ -188,7 +189,26 @@ fn main() -> Result<()> {
                     println!("{:?}", input);
                 }
                 WindowEvent::DroppedFile(path) => {
-                    audio_player.path.replace(path);
+                    audio_player.path.replace(path.clone());
+                    let data = std::fs::read(path.clone()).expect("Could not open file");
+                    let (_, mut samples) = puremp3::read_mp3(Cursor::new(data)).unwrap();
+
+                    output_stream.replace(
+                        output_device
+                            .build_output_stream(
+                                &output_device.default_output_config().unwrap().into(),
+                                move |data: &mut [f32], _| {
+                                    for d in data {
+                                        if let Some((left, right)) = samples.next() {
+                                            *d = left;
+                                        }
+                                    }
+                                },
+                                |err| panic!(),
+                            )
+                            .unwrap(),
+                    );
+                    output_stream.as_ref().unwrap().play().unwrap();
                 }
                 WindowEvent::CursorMoved {
                     position: PhysicalPosition { x, y },
