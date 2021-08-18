@@ -2,12 +2,12 @@ extern crate glium;
 
 mod draw;
 mod input;
-use std::{io::Cursor, path::PathBuf};
+use std::{io::Cursor, iter, path::PathBuf};
 
 use color_eyre::{owo_colors::Color, Result};
 use cpal::{
     traits::{DeviceTrait, HostTrait, StreamTrait},
-    Device, Host, Stream,
+    Device, Host, Stream, StreamConfig, SupportedInputConfigs,
 };
 use crossbeam::channel::{Receiver, Sender};
 use draw::draw_frame;
@@ -109,8 +109,6 @@ fn init_audio(output: Sender<[f32; 480]>) -> Result<AudioInfo> {
     let output_device = host
         .default_output_device()
         .expect("no output device available");
-    let config = output_device.default_output_config()?;
-    println!("OutputStreamConfigs: {:?}", config);
     Ok(AudioInfo {
         host,
         input_device,
@@ -191,16 +189,20 @@ fn main() -> Result<()> {
                 WindowEvent::DroppedFile(path) => {
                     audio_player.path.replace(path.clone());
                     let data = std::fs::read(path.clone()).expect("Could not open file");
-                    let (_, mut samples) = puremp3::read_mp3(Cursor::new(data)).unwrap();
+                    let (header, samples) = puremp3::read_mp3(Cursor::new(data)).unwrap();
+                    let mut samples =
+                        samples.flat_map(|(l, r)| Iterator::chain(iter::once(l), iter::once(r)));
+
+                    let config = output_device.default_output_config().unwrap().config();
 
                     output_stream.replace(
                         output_device
                             .build_output_stream(
-                                &output_device.default_output_config().unwrap().into(),
-                                move |data: &mut [f32], _| {
+                                &config,
+                                move |data: &mut [f32], info| {
                                     for d in data {
-                                        if let Some((left, right)) = samples.next() {
-                                            *d = left;
+                                        if let Some(dd) = samples.next() {
+                                            *d = dd;
                                         }
                                     }
                                 },
