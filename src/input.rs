@@ -8,6 +8,8 @@ use cpal::{
     Device, Stream,
 };
 use crossbeam::channel::{unbounded, Receiver};
+use egui::Modifiers;
+use glium::glutin::event::ModifiersState;
 
 pub struct InputHandler {
     pub raw_input: egui::RawInput,
@@ -16,6 +18,15 @@ pub struct InputHandler {
 impl InputHandler {
     pub fn raw(&mut self) -> egui::RawInput {
         std::mem::take(&mut self.raw_input)
+    }
+    pub fn modifiers(&mut self, mods: ModifiersState) {
+        self.raw_input.modifiers = Modifiers {
+            alt: mods.alt(),
+            ctrl: mods.ctrl(),
+            shift: mods.shift(),
+            mac_cmd: false,
+            command: mods.ctrl(),
+        };
     }
 }
 
@@ -59,7 +70,7 @@ impl AudioPlayer {
                 .build_output_stream(
                     &config,
                     move |data: &mut [f32], info| {
-                        for (frame_index, frame) in data.chunks_mut(channels as _).enumerate() {
+                        for frame in data.chunks_mut(channels as _) {
                             if let Some((ls, rs)) = samples.next() {
                                 frame[0] = ls * 0.3;
                                 frame[1] = rs * 0.3;

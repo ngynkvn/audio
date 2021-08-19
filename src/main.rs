@@ -102,7 +102,9 @@ fn init_audio(output: Sender<[f32; 480]>) -> Result<AudioInfo> {
                 *c = *i;
             }
             // fft.process(&mut buffer);
-            output.send(buffer).unwrap();
+            output.send(buffer).unwrap_or_else(|err| {
+                dbg!(err);
+            });
         },
         |err| panic!(),
     )?;
@@ -236,16 +238,16 @@ fn main() -> Result<()> {
                 WindowEvent::MouseWheel {
                     delta: MouseScrollDelta::LineDelta(x, y),
                     ..
-                } => input_handler.raw_input.scroll_delta = Vec2::new(x, y),
+                } => {
+                    if input_handler.raw_input.modifiers.ctrl {
+                        println!("!");
+                        input_handler.raw_input.zoom_delta += 1.25 * y;
+                    } else {
+                        input_handler.raw_input.scroll_delta += Vec2::new(x, y)
+                    }
+                }
                 WindowEvent::ModifiersChanged(mods) => {
-                    println!("{:?}", mods);
-                    input_handler.raw_input.modifiers = Modifiers {
-                        alt: mods.alt(),
-                        ctrl: mods.ctrl(),
-                        shift: mods.shift(),
-                        mac_cmd: false,
-                        command: mods.ctrl(),
-                    };
+                    input_handler.modifiers(mods);
                 }
                 WindowEvent::Resized(_) => {}
                 WindowEvent::Moved(_)
