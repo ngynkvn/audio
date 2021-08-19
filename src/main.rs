@@ -11,9 +11,9 @@ use cpal::{
 };
 use crossbeam::channel::{Receiver, Sender};
 use draw::draw_frame;
-use egui::plot::Value;
 use egui::plot::Values;
 use egui::Stroke;
+use egui::{output, plot::Value};
 use egui::{plot::Line, Pos2};
 use egui::{plot::Plot, Vec2};
 use egui::{plot::Points, Modifiers};
@@ -139,13 +139,25 @@ fn init_graphics() -> Result<(Display, Program, VertexBuffer<Vertex>, EventLoop<
     Ok((display, program, vertices, events_loop))
 }
 
+use clap::{AppSettings, Clap};
+
+#[derive(Clap)]
+#[clap(version = "1.0", author = "Kevin Nguyen <ngynkvn@gmail.com>")]
+#[clap(setting = AppSettings::ColoredHelp)]
+struct Args {
+    /// Path to an mp3.
+    path: Option<PathBuf>,
+}
+
 fn main() -> Result<()> {
     color_eyre::install()?;
     std::env::set_var("RUST_BACKTRACE", "1");
     puffin::profile_function!();
     puffin::set_scopes_on(true);
+    let args = Args::parse();
     let server = puffin_http::Server::new("127.0.0.1:8585").unwrap();
     let mut buffer = [Default::default(); 480];
+    let mut output_buffer = [0f32; 480];
     let (tx, rx) = crossbeam::channel::unbounded();
 
     let AudioInfo {
@@ -159,12 +171,19 @@ fn main() -> Result<()> {
     let mut egui = egui::CtxRef::default();
     let mut painter = egui_glium::Painter::new(&display);
 
-    let mut audio_player = AudioPlayer { path: None };
+    let mut audio_player = AudioPlayer {
+        path: None,
+        rx: None,
+        buffer: [0.0; 500],
+    };
     let mut input_handler = InputHandler {
         raw_input: Default::default(),
         pointer_position: Default::default(),
     };
     // let indices = IndexBuffer::new(&display, PrimitiveType::Points, &[0, 1, 2])?;
+    if let Some(path) = args.path {
+        audio_player.play(path, &output_device, &mut output_stream);
+    }
 
     input_stream.play()?;
     event_loop.run(move |e, _t, c| {
@@ -187,30 +206,7 @@ fn main() -> Result<()> {
                     println!("{:?}", input);
                 }
                 WindowEvent::DroppedFile(path) => {
-                    audio_player.path.replace(path.clone());
-                    let data = std::fs::read(path.clone()).expect("Could not open file");
-                    let (header, samples) = puremp3::read_mp3(Cursor::new(data)).unwrap();
-                    let mut samples =
-                        samples.flat_map(|(l, r)| Iterator::chain(iter::once(l), iter::once(r)));
-
-                    let config = output_device.default_output_config().unwrap().config();
-
-                    output_stream.replace(
-                        output_device
-                            .build_output_stream(
-                                &config,
-                                move |data: &mut [f32], info| {
-                                    for d in data {
-                                        if let Some(dd) = samples.next() {
-                                            *d = dd;
-                                        }
-                                    }
-                                },
-                                |err| panic!(),
-                            )
-                            .unwrap(),
-                    );
-                    output_stream.as_ref().unwrap().play().unwrap();
+                    audio_player.play(path, &output_device, &mut output_stream);
                 }
                 WindowEvent::CursorMoved {
                     position: PhysicalPosition { x, y },
@@ -275,7 +271,7 @@ fn main() -> Result<()> {
                     &buffer,
                     &mut input_handler,
                     &mut painter,
-                    &audio_player,
+                    &mut audio_player,
                 );
             }
             Event::DeviceEvent {

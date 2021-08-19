@@ -48,9 +48,14 @@ fn draw_circle_graph(buffer: &[f32]) -> impl FnOnce(&mut Ui) {
     }
 }
 
-fn draw_audio_player<'a>(path: &'a PathBuf) -> impl FnOnce(&mut Ui) + 'a {
+fn draw_audio_player<'a>(
+    path: &'a PathBuf,
+    audio_player: &'a mut AudioPlayer,
+) -> impl FnOnce(&mut Ui) + 'a {
     move |ui| {
         ui.label(format!("Now playing: {:?}", path));
+        audio_player.read_rx();
+        draw_circle_graph(&audio_player.buffer)(ui);
     }
 }
 
@@ -60,7 +65,7 @@ pub fn draw_frame(
     buffer: &[f32],
     input_handler: &mut InputHandler,
     painter: &mut Painter,
-    audio_player: &AudioPlayer,
+    audio_player: &mut AudioPlayer,
 ) {
     egui.begin_frame(input_handler.raw());
     egui::Window::new("Line Graph")
@@ -71,10 +76,10 @@ pub fn draw_frame(
         .default_size((300.0, 300.0))
         .show(&egui, draw_circle_graph(buffer));
 
-    if let Some(path) = &audio_player.path {
+    if let Some(path) = audio_player.path.clone() {
         egui::Window::new("Now playing")
-            .default_size((100.0, 100.0))
-            .show(&egui, draw_audio_player(path));
+            .default_size((200.0, 200.0))
+            .show(&egui, draw_audio_player(&path, audio_player));
     }
 
     let (_output, shapes) = egui.end_frame();
